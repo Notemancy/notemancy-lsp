@@ -1,5 +1,4 @@
-use crate::handlers::document_symbol;
-use crate::handlers::workspace_symbol;
+use crate::handlers::{completion, document_symbol, workspace_symbol};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -15,8 +14,14 @@ impl LanguageServer for MarkdownLanguageServer {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 workspace_symbol_provider: Some(OneOf::Left(true)),
-                // Enable document symbol support.
                 document_symbol_provider: Some(OneOf::Left(true)),
+                // Configure the completion provider.
+                completion_provider: Some(CompletionOptions {
+                    // We want completions when the user types '['.
+                    trigger_characters: Some(vec!["[".to_string()]),
+                    resolve_provider: Some(false),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -27,7 +32,6 @@ impl LanguageServer for MarkdownLanguageServer {
         Ok(())
     }
 
-    // Workspace symbols method remains unchanged.
     async fn symbol(
         &self,
         params: WorkspaceSymbolParams,
@@ -35,11 +39,14 @@ impl LanguageServer for MarkdownLanguageServer {
         workspace_symbol::handle(self, params).await
     }
 
-    // Document symbols method for the open document.
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         document_symbol::handle_document_symbol(self, params).await
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        completion::handle_completion(self, params).await
     }
 }

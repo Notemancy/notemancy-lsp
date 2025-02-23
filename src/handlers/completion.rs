@@ -6,10 +6,10 @@ use tower_lsp::lsp_types::*;
 /// Computes the virtual path for a given local path.
 fn get_virtual_path(local_path: &str) -> String {
     let path = Path::new(local_path);
-    let mut virtual_path = path.to_string_lossy().replace("\\", "/");
-    if virtual_path.ends_with(".md") {
-        virtual_path = virtual_path[..virtual_path.len() - 3].to_string();
-    }
+    let virtual_path = path.to_string_lossy().replace("\\", "/");
+    // if virtual_path.ends_with(".md") {
+    //     virtual_path = virtual_path[..virtual_path.len() - 3].to_string();
+    // }
     virtual_path
 }
 
@@ -18,6 +18,7 @@ pub async fn handle_completion(
     server: &MarkdownLanguageServer,
     params: CompletionParams,
 ) -> Result<Option<CompletionResponse>> {
+    let _ = params;
     // (Optionally) inspect params.context or the document text to ensure we are in a wiki-link context.
     // For simplicity, we assume that when the trigger character is '[' this is a wiki-link.
 

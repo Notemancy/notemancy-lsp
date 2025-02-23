@@ -8,6 +8,7 @@ pub async fn handle_document_symbol(
     server: &MarkdownLanguageServer,
     params: DocumentSymbolParams,
 ) -> Result<Option<DocumentSymbolResponse>> {
+    let _ = server;
     let uri = params.text_document.uri;
     let file_path = uri.to_file_path().map_err(|_| tower_lsp::jsonrpc::Error {
         code: tower_lsp::jsonrpc::ErrorCode::InvalidParams,

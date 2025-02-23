@@ -1,4 +1,4 @@
-use crate::handlers::{completion, document_symbol, workspace_symbol};
+use crate::handlers::{completion, document_symbol, hover, workspace_symbol};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -8,6 +8,12 @@ pub struct MarkdownLanguageServer {
     pub(crate) db: notemancy_core::db::Database,
 }
 
+impl std::fmt::Debug for MarkdownLanguageServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        <Client as std::fmt::Debug>::fmt(&self.client, f)
+    }
+}
+
 #[tower_lsp::async_trait]
 impl LanguageServer for MarkdownLanguageServer {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
@@ -15,13 +21,13 @@ impl LanguageServer for MarkdownLanguageServer {
             capabilities: ServerCapabilities {
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
-                // Configure the completion provider.
                 completion_provider: Some(CompletionOptions {
-                    // We want completions when the user types '['.
                     trigger_characters: Some(vec!["[".to_string()]),
                     resolve_provider: Some(false),
                     ..Default::default()
                 }),
+                // Advertise hover support.
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -48,5 +54,9 @@ impl LanguageServer for MarkdownLanguageServer {
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         completion::handle_completion(self, params).await
+    }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        hover::handle_hover(self, params).await
     }
 }

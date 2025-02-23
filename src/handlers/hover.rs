@@ -18,16 +18,22 @@ fn position_to_offset(content: &str, position: &Position) -> usize {
     offset
 }
 
-/// Attempt to extract a wikilink at the given byte offset in the document.
+/// Attempt to extract a wiki-link at the given byte offset in the document.
 /// This function looks for the last occurrence of "[[" before the offset and the next occurrence of "]]" after the offset.
-/// If found, it returns the text between them (trimmed).
+/// If found, it returns the virtual path portion (trimmed) even if an alias is present.
 fn extract_wikilink_at_offset(content: &str, offset: usize) -> Option<String> {
     let start_index = content[..offset].rfind("[[")?;
     let end_index = content[offset..].find("]]")?;
     let end_index = offset + end_index;
-    // Extract and trim the content inside the delimiters.
-    let link_text = &content[start_index + 2..end_index];
-    Some(link_text.trim().to_string())
+    // Extract the text inside the delimiters and trim it.
+    let link_text = content[start_index + 2..end_index].trim();
+    // If the wiki-link contains a pipe, split on it and take the left-hand side as the virtual path.
+    let virtual_link = if let Some(pipe_index) = link_text.find('|') {
+        link_text[..pipe_index].trim()
+    } else {
+        link_text
+    };
+    Some(virtual_link.to_string())
 }
 
 pub async fn handle_hover(
@@ -63,8 +69,11 @@ pub async fn handle_hover(
     eprintln!("[DEBUG] Computed byte offset: {}", offset);
 
     if let Some(virtual_link) = extract_wikilink_at_offset(&content, offset) {
-        eprintln!("[DEBUG] Extracted wiki-link: '{}'", virtual_link);
-        // Use the new dedicated method here:
+        eprintln!(
+            "[DEBUG] Extracted wiki-link (virtual path): '{}'",
+            virtual_link
+        );
+        // Use the dedicated method to retrieve the record.
         if let Some(record) = server
             .db
             .get_page_by_virtual_path(&virtual_link)

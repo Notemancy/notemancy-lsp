@@ -1,0 +1,14 @@
+[package]
+name = "notemancy-lsp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tower-lsp = "0.20"
+tokio = { version = "1.0", features = ["full", "test-util"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+notemancy-core = { path = "../notemancy-core" }
+pulldown-cmark = "0.13"
+async-trait = "0.1"
+tempfile = "3.0"

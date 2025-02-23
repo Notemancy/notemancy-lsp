@@ -1,0 +1,17 @@
+[package]
+name = "notemancy-lsp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.36", features = ["full"] }
+tower-lsp = "0.20"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+env_logger = "0.11"
+pulldown-cmark = "0.10"
+
+[lib]
+name = "notemancy_lsp"
+path = "src/lib.rs"

@@ -1,18 +1,12 @@
-// src/server.rs
+use crate::handlers::document_symbol;
 use crate::handlers::workspace_symbol;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
 pub struct MarkdownLanguageServer {
-    pub(crate) client: Client, // Changed from private to pub(crate)
+    pub(crate) client: Client,
     pub(crate) db: notemancy_core::db::Database,
-}
-
-impl std::fmt::Debug for MarkdownLanguageServer {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        <Client as std::fmt::Debug>::fmt(&self.client, f)
-    }
 }
 
 #[tower_lsp::async_trait]
@@ -21,6 +15,8 @@ impl LanguageServer for MarkdownLanguageServer {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 workspace_symbol_provider: Some(OneOf::Left(true)),
+                // Enable document symbol support.
+                document_symbol_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -31,11 +27,19 @@ impl LanguageServer for MarkdownLanguageServer {
         Ok(())
     }
 
-    // The method is actually called symbol
+    // Workspace symbols method remains unchanged.
     async fn symbol(
         &self,
         params: WorkspaceSymbolParams,
     ) -> Result<Option<Vec<SymbolInformation>>> {
         workspace_symbol::handle(self, params).await
+    }
+
+    // Document symbols method for the open document.
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        document_symbol::handle_document_symbol(self, params).await
     }
 }

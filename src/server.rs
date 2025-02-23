@@ -1,4 +1,4 @@
-use crate::handlers::{completion, document_symbol, hover, workspace_symbol};
+use crate::handlers::{completion, definition, document_symbol, hover, workspace_symbol};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -26,7 +26,8 @@ impl LanguageServer for MarkdownLanguageServer {
                     resolve_provider: Some(false),
                     ..Default::default()
                 }),
-                // Advertise hover support.
+                // Advertise go-to definition support.
+                definition_provider: Some(OneOf::Left(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 ..Default::default()
             },
@@ -50,6 +51,14 @@ impl LanguageServer for MarkdownLanguageServer {
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         document_symbol::handle_document_symbol(self, params).await
+    }
+
+    // Change this method name and parameter type.
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        definition::handle_definition(self, params).await
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {

@@ -1,5 +1,6 @@
 use crate::server::MarkdownLanguageServer;
 use notemancy_core::db::FileRecord;
+use rayon::prelude::*;
 use serde_json::Value;
 use std::path::Path;
 use tower_lsp::jsonrpc::Result;
@@ -25,9 +26,8 @@ fn get_alias(file: &FileRecord) -> String {
     file.virtual_path.clone()
 }
 
-/// Provides completions for wiki-links.
-/// This function replaces either just the opening `[[` or a complete auto-paired `[[]]`
-/// with the full wiki-link syntax: `[[<virtual path> | alias]]`
+/// Provides completions for wiki-links using Rayon for parallel processing.
+/// It replaces the region from the starting "[[" to any auto-paired "]]" with the full link.
 pub async fn handle_completion(
     server: &MarkdownLanguageServer,
     params: CompletionParams,
@@ -43,14 +43,13 @@ pub async fn handle_completion(
         None => return Ok(None),
     };
 
-    // Split the document into lines and make sure the current line exists.
     let lines: Vec<&str> = text.lines().collect();
     if position.line as usize >= lines.len() {
         return Ok(None);
     }
     let current_line = lines[position.line as usize];
 
-    // Clamp the cursor index to avoid out-of-bounds.
+    // Clamp cursor index to prevent out-of-bound errors.
     let cursor_index = std::cmp::min(position.character as usize, current_line.len());
 
     // Find the start of the wiki-link trigger by searching backwards for "[[".
@@ -59,7 +58,7 @@ pub async fn handle_completion(
         None => return Ok(None),
     };
 
-    // Check if there is a closing "]]" immediately after the cursor.
+    // Check for an auto-paired closing bracket after the cursor.
     let end_index = if cursor_index + 2 <= current_line.len()
         && &current_line[cursor_index..cursor_index + 2] == "]]"
     {
@@ -68,7 +67,6 @@ pub async fn handle_completion(
         cursor_index
     };
 
-    // Build the text edit range.
     let range = Range {
         start: Position {
             line: position.line,
@@ -80,31 +78,33 @@ pub async fn handle_completion(
         },
     };
 
-    // Generate completion items.
-    let mut items = Vec::new();
+    // Retrieve the file tree from the database.
     let files = server.db.get_file_tree().unwrap_or_default();
-    for file in files {
-        if !file.virtual_path.ends_with(".md") {
-            continue;
-        }
 
-        let virtual_path = get_virtual_path(&file.virtual_path);
-        let alias = get_alias(&file);
-        // Create the wiki-link, including the brackets.
-        let insertion_text = format!("[[{} | {}]]", virtual_path, alias);
+    // Use Rayon to parallelize the processing of files.
+    let items: Vec<CompletionItem> = files
+        .par_iter()
+        .filter_map(|file| {
+            if !file.virtual_path.ends_with(".md") {
+                return None;
+            }
 
-        items.push(CompletionItem {
-            label: virtual_path,
-            kind: Some(CompletionItemKind::FILE),
-            // Use text_edit to replace the trigger region with the complete wiki-link.
-            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-                range,
-                new_text: insertion_text,
-            })),
-            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
-            ..Default::default()
-        });
-    }
+            let virtual_path = get_virtual_path(&file.virtual_path);
+            let alias = get_alias(file);
+            let insertion_text = format!("[[{} | {}]]", virtual_path, alias);
+
+            Some(CompletionItem {
+                label: virtual_path,
+                kind: Some(CompletionItemKind::FILE),
+                text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                    range,
+                    new_text: insertion_text,
+                })),
+                insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                ..Default::default()
+            })
+        })
+        .collect();
 
     Ok(Some(CompletionResponse::Array(items)))
 }

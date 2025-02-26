@@ -1,6 +1,5 @@
 use crate::server::MarkdownLanguageServer;
 use std::fs;
-use std::path::Path;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 

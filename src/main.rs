@@ -19,9 +19,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    // Create the language server
+    // Use the new constructor that initializes the documents cache.
     let (service, socket) =
-        LspService::build(|client| MarkdownLanguageServer { client, db }).finish();
+        LspService::build(|client| MarkdownLanguageServer::new(client, db)).finish();
 
     // Start the LSP server
     Server::new(stdin, stdout, socket).serve(service).await;

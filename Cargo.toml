@@ -12,3 +12,4 @@ notemancy-core = { path = "../notemancy-core" }
 pulldown-cmark = "0.13"
 async-trait = "0.1"
 tempfile = "3.0"
+rayon = "1.10"

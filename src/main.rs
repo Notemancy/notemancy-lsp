@@ -1,30 +1,15 @@
-// src/main.rs
-mod handlers;
+mod parser;
 mod server;
-mod symbol;
 
-use notemancy_core::db::Database;
-use server::MarkdownLanguageServer;
-use tower_lsp::{LspService, Server};
+use tokio::io::{stdin, stdout};
+use tower_lsp::LspService;
+use tower_lsp::Server;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing/logging if needed
-    // tracing_subscriber::fmt().init();
-
-    // Initialize the database
-    let db = Database::new()?;
-
-    // Create LSP server instance
-    let stdin = tokio::io::stdin();
-    let stdout = tokio::io::stdout();
-
-    // Use the new constructor that initializes the documents cache.
-    let (service, socket) =
-        LspService::build(|client| MarkdownLanguageServer::new(client, db)).finish();
-
-    // Start the LSP server
+async fn main() {
+    let stdin = stdin();
+    let stdout = stdout();
+    let (service, socket) = LspService::new(|client| server::Backend::new(client));
+    // Note: We now pass the service to the `serve` method.
     Server::new(stdin, stdout, socket).serve(service).await;
-
-    Ok(())
 }

@@ -8,7 +8,7 @@ use tower_lsp::{async_trait, Client, LanguageServer};
 use crate::parser::parse_markdown_symbols;
 use notemancy_core::utils;
 
-// Import fuzzy matcher types.
+// For fuzzy matching in other methods.
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
@@ -33,9 +33,9 @@ impl LanguageServer for Backend {
     async fn initialize(&self, _params: InitializeParams) -> Result<InitializeResult, Error> {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
-                // Document symbols (for in-file headings)
+                // In-document symbols.
                 document_symbol_provider: Some(OneOf::Left(true)),
-                // Workspace symbols (for full-note search)
+                // Workspace symbols.
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 // Completions for wiki-links.
                 completion_provider: Some(CompletionOptions {
@@ -45,6 +45,8 @@ impl LanguageServer for Backend {
                     all_commit_characters: None,
                     work_done_progress_options: Default::default(),
                 }),
+                // Enable hover support.
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
@@ -93,10 +95,7 @@ impl LanguageServer for Backend {
         }
     }
 
-    /// Workspace symbol request:
-    /// For every file in the workspace, read its content and parse markdown symbols.
-    /// Then convert these into flat SymbolInformation items.
-    /// If a query is provided, apply fuzzy matching (case-sensitive) on the symbol name.
+    /// Workspace symbol request (with fuzzy matching).
     async fn symbol(
         &self,
         params: WorkspaceSymbolParams,
@@ -150,7 +149,6 @@ impl LanguageServer for Backend {
             }
         }
 
-        // If a query is provided, use fuzzy matching.
         if !params.query.is_empty() {
             let matcher = SkimMatcherV2::default();
             let mut scored: Vec<(i64, SymbolInformation)> = results
@@ -171,9 +169,8 @@ impl LanguageServer for Backend {
 
     /// Completion request for wiki-links:
     /// When the text preceding the cursor contains a wiki-link trigger (i.e. it contains "[["),
-    /// extract the substring after the last occurrence of "[[" as the query.
-    /// Then, fetch wiki-link records from the core database and filter them via fuzzy matching.
-    /// The inserted text is formatted as "<vpath> | <title>".
+    /// extract the query part after the last occurrence of "[[" and use fuzzy matching to filter
+    /// wiki-link candidates. Each candidate will insert text formatted as "<vpath> | <title>".
     async fn completion(
         &self,
         params: CompletionParams,
@@ -201,14 +198,13 @@ impl LanguageServer for Backend {
         // Get the text up to the cursor.
         let prefix = &current_line[..(position.character as usize).min(current_line.len())];
 
-        // Find the last occurrence of "[[" in the prefix.
+        // Find the last occurrence of "[[".
         let query = if let Some(idx) = prefix.rfind("[[") {
             &prefix[idx + 2..]
         } else {
             ""
         };
 
-        // Fetch wiki-link records from the database.
         let records =
             match utils::get_records_by_column(&["vpath", "title"]).map_err(|e| e.to_string()) {
                 Ok(r) => r,
@@ -228,7 +224,6 @@ impl LanguageServer for Backend {
             let vpath = record.get("vpath").and_then(|v| v.clone());
             let title = record.get("title").and_then(|t| t.clone());
             if let (Some(vpath), Some(title)) = (vpath, title) {
-                // Prepare the text to insert: "<vpath> | <title>"
                 let insert_text = format!("{} | {}", vpath, title);
                 let item = CompletionItem {
                     label: title.clone(),
@@ -240,17 +235,14 @@ impl LanguageServer for Backend {
             }
         }
 
-        // If a query is provided, use fuzzy matching to filter wiki-link completions.
         let items = if !query.is_empty() {
             let matcher = SkimMatcherV2::default();
             let mut scored: Vec<(i64, CompletionItem)> = candidates
                 .into_iter()
                 .filter_map(|item| {
-                    if let Some(score) = matcher.fuzzy_match(&item.label, query) {
-                        Some((score, item))
-                    } else {
-                        None
-                    }
+                    matcher
+                        .fuzzy_match(&item.label, query)
+                        .map(|score| (score, item))
                 })
                 .collect();
             scored.sort_by(|a, b| b.0.cmp(&a.0));
@@ -260,5 +252,69 @@ impl LanguageServer for Backend {
         };
 
         Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>, Error> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let text = {
+            let docs = self.docs.lock().unwrap();
+            docs.get(&uri).cloned()
+        };
+
+        let text = match text {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        let lines: Vec<&str> = text.lines().collect();
+        if (position.line as usize) >= lines.len() {
+            return Ok(None);
+        }
+        let line = lines[position.line as usize];
+
+        // Look for a wiki-link on this line.
+        let start_idx = line[..(position.character as usize)].rfind("[[");
+        let end_idx = line[position.character as usize..].find("]]");
+
+        if let (Some(start), Some(rel_end)) = (start_idx, end_idx) {
+            let end = position.character as usize + rel_end;
+            let wiki_text = &line[start + 2..end]; // content between [[ and ]]
+            let parts: Vec<&str> = wiki_text.split('|').collect();
+            if parts.is_empty() {
+                return Ok(None);
+            }
+            let vpath = parts[0].trim();
+            // Read the file using the virtual path.
+            let file_content =
+                match utils::read_file(None, Some(vpath), true).map_err(|e| e.to_string()) {
+                    Ok(c) => c,
+                    Err(err) => {
+                        self.client
+                            .log_message(
+                                MessageType::ERROR,
+                                format!("Error reading file for hover: {}", err),
+                            )
+                            .await;
+                        return Ok(None);
+                    }
+                };
+            // Take a preview (for example, the first 10 lines).
+            let preview: String = file_content.lines().collect::<Vec<&str>>().join("\n");
+
+            let hover_value = format!("**Preview for {}**\n\n{}", vpath, preview);
+            let hover_content = HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: hover_value,
+            });
+            let hover = Hover {
+                contents: hover_content,
+                range: None,
+            };
+            Ok(Some(hover))
+        } else {
+            Ok(None)
+        }
     }
 }

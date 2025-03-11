@@ -94,7 +94,6 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
-                // Code action provider as before.
                 code_action_provider: Some(CodeActionProviderCapability::Options(
                     CodeActionOptions {
                         code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
@@ -102,11 +101,12 @@ impl LanguageServer for Backend {
                         work_done_progress_options: Default::default(),
                     },
                 )),
-                // Add the execute command provider.
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec!["notemancy.generateTags".to_string()],
                     work_done_progress_options: Default::default(),
                 }),
+                // Register go-to-definition
+                definition_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
             server_info: None,
@@ -469,5 +469,75 @@ impl LanguageServer for Backend {
             return Ok(Some(serde_json::json!(true)));
         }
         Ok(None)
+    }
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>, Error> {
+        // Get the current document and position.
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        // Retrieve document text from cache.
+        let text = {
+            let docs = self.docs.lock().unwrap();
+            docs.get(&uri).cloned()
+        };
+
+        let text = match text {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        // Split the text into lines and check if the line exists.
+        let lines: Vec<&str> = text.lines().collect();
+        if (position.line as usize) >= lines.len() {
+            return Ok(None);
+        }
+        let line = lines[position.line as usize];
+
+        // Look for a wiki-link by finding the delimiters "[[" and "]]" around the cursor.
+        let start_idx = line[..(position.character as usize)].rfind("[[");
+        let end_idx = line[position.character as usize..].find("]]");
+
+        if let (Some(start), Some(rel_end)) = (start_idx, end_idx) {
+            let end = position.character as usize + rel_end;
+            // Extract the text between the delimiters.
+            let wiki_text = &line[start + 2..end];
+            let parts: Vec<&str> = wiki_text.split('|').collect();
+            if parts.is_empty() {
+                return Ok(None);
+            }
+            let vpath = parts[0].trim();
+
+            // Lookup the local path corresponding to this vpath.
+            match utils::get_lpath(vpath) {
+                Ok(Some(lpath)) => {
+                    // Convert the local path to a URL.
+                    if let Ok(target_uri) = Url::from_file_path(&lpath) {
+                        // Create a location. We set the range to the beginning of the target file.
+                        let def_location = Location {
+                            uri: target_uri,
+                            range: Range {
+                                start: Position {
+                                    line: 0,
+                                    character: 0,
+                                },
+                                end: Position {
+                                    line: 0,
+                                    character: 0,
+                                },
+                            },
+                        };
+                        return Ok(Some(GotoDefinitionResponse::Scalar(def_location)));
+                    }
+                    Ok(None)
+                }
+                Ok(None) => Ok(None),
+                Err(_e) => Err(Error::internal_error()),
+            }
+        } else {
+            Ok(None)
+        }
     }
 }

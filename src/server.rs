@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -95,7 +94,7 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
-                // Updated CodeAction provider using the new type and required fields.
+                // Code action provider as before.
                 code_action_provider: Some(CodeActionProviderCapability::Options(
                     CodeActionOptions {
                         code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
@@ -103,6 +102,11 @@ impl LanguageServer for Backend {
                         work_done_progress_options: Default::default(),
                     },
                 )),
+                // Add the execute command provider.
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: vec!["notemancy.generateTags".to_string()],
+                    work_done_progress_options: Default::default(),
+                }),
                 ..ServerCapabilities::default()
             },
             server_info: None,
@@ -366,79 +370,104 @@ impl LanguageServer for Backend {
         &self,
         params: CodeActionParams,
     ) -> Result<Option<CodeActionResponse>, Error> {
-        let uri = params.text_document.uri;
-        let text = {
-            let docs = self.docs.lock().unwrap();
-            docs.get(&uri).cloned()
-        };
-
-        let text = match text {
-            Some(t) => t,
-            None => return Ok(None),
-        };
-
-        // Clone text for use in the blocking task so the original remains available.
-        let text_for_tags = text.clone();
-
-        // Run generate_tags in a blocking task, converting errors to String.
-        let tags_result = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
-            generate_tags(&text_for_tags).map_err(|e| e.to_string())
-        })
-        .await
-        .map_err(|_| Error::internal_error())?;
-
-        let tags = tags_result.map_err(|err_str| Error {
-            code: tower_lsp::jsonrpc::ErrorCode::InternalError,
-            message: Cow::Owned(err_str), // Convert String to Cow<'static, str>
-            data: None,
-        })?;
-
-        let new_text = update_document_with_tags(&text, &tags);
-
-        let lines: Vec<&str> = text.lines().collect();
-        let end_position = if let Some(last_line) = lines.last() {
-            Position {
-                line: (lines.len() - 1) as u32,
-                character: last_line.len() as u32,
-            }
-        } else {
-            Position {
-                line: 0,
-                character: 0,
-            }
-        };
-        let full_range = Range {
-            start: Position {
-                line: 0,
-                character: 0,
-            },
-            end: end_position,
-        };
-
-        let text_edit = TextEdit {
-            range: full_range,
-            new_text,
-        };
-
-        let mut changes = std::collections::HashMap::new();
-        changes.insert(uri.clone(), vec![text_edit]);
-        let workspace_edit = WorkspaceEdit {
-            changes: Some(changes),
-            document_changes: None,
-            change_annotations: None,
-        };
-
-        let code_action = CodeAction {
+        // This code action is always available on Markdown files.
+        let command = Command {
             title: "Generate Tags".to_string(),
-            kind: Some(CodeActionKind::QUICKFIX),
-            diagnostics: None,
-            edit: Some(workspace_edit),
-            command: None,
-            is_preferred: Some(true),
-            disabled: None,
-            data: None,
+            // The command identifier that will be handled in execute_command.
+            command: "notemancy.generateTags".to_string(),
+            // Pass the document URI as an argument so that the command can fetch the text later.
+            arguments: Some(vec![serde_json::to_value(params.text_document.uri).unwrap()]),
         };
 
-        Ok(Some(vec![CodeActionOrCommand::CodeAction(code_action)]))
+        // Return the command wrapped as a CodeActionOrCommand.
+        Ok(Some(vec![CodeActionOrCommand::Command(command)]))
+    }
+
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        if params.command == "notemancy.generateTags" {
+            // Extract the URI from the command arguments.
+            let mut args = params.arguments; // args is already a Vec<Value>
+            let uri_value = args
+                .pop()
+                .ok_or_else(|| Error::invalid_params("Missing document URI"))?;
+            let uri: Url = serde_json::from_value(uri_value)
+                .map_err(|e| Error::invalid_params(format!("Invalid URI: {}", e)))?;
+
+            // Get the document text from our cache.
+            let text = {
+                let docs = self.docs.lock().unwrap();
+                docs.get(&uri).cloned()
+            };
+
+            let text = match text {
+                Some(t) => t,
+                None => return Ok(None),
+            };
+
+            // Run heavy processing in a blocking task.
+            let tags_result = tokio::task::spawn_blocking({
+                let text_for_tags = text.clone();
+                move || -> Result<Vec<String>, String> {
+                    generate_tags(&text_for_tags).map_err(|e| e.to_string())
+                }
+            })
+            .await
+            .map_err(|_| Error::internal_error())?;
+
+            let tags = tags_result.map_err(|err_str| Error {
+                code: tower_lsp::jsonrpc::ErrorCode::InternalError,
+                message: std::borrow::Cow::Owned(err_str),
+                data: None,
+            })?;
+
+            // Generate new text by updating the YAML frontmatter.
+            let new_text = update_document_with_tags(&text, &tags);
+
+            // Compute full document range.
+            let lines: Vec<&str> = text.lines().collect();
+            let end_position = if let Some(last_line) = lines.last() {
+                Position {
+                    line: (lines.len() - 1) as u32,
+                    character: last_line.len() as u32,
+                }
+            } else {
+                Position {
+                    line: 0,
+                    character: 0,
+                }
+            };
+            let full_range = Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: end_position,
+            };
+
+            // Create a workspace edit that replaces the entire document.
+            let text_edit = TextEdit {
+                range: full_range,
+                new_text,
+            };
+            let mut changes = std::collections::HashMap::new();
+            changes.insert(uri.clone(), vec![text_edit]);
+            let workspace_edit = WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            };
+
+            // Apply the workspace edit.
+            self.client
+                .apply_edit(workspace_edit)
+                .await
+                .map_err(|_| Error::internal_error())?;
+
+            return Ok(Some(serde_json::json!(true)));
+        }
+        Ok(None)
     }
 }

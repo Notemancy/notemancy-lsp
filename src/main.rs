@@ -5,10 +5,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use notemancy_core::config; // Import the config module from notemancy-core crate
+use notemancy_core::config::Config;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use url::Url;
+
+use notemancy_core::db::crud;
+use tower_lsp::lsp_types::{
+    CompletionContext, CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse,
+    InsertTextFormat,
+};
 
 #[derive(Clone, Debug)]
 struct Backend {
@@ -19,14 +26,23 @@ struct Backend {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
-    async fn initialize(&self, _params: InitializeParams) -> Result<InitializeResult> {
-        Ok(InitializeResult {
+    async fn initialize(
+        &self,
+        _params: tower_lsp::lsp_types::InitializeParams,
+    ) -> tower_lsp::jsonrpc::Result<tower_lsp::lsp_types::InitializeResult> {
+        Ok(tower_lsp::lsp_types::InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
                 document_symbol_provider: Some(OneOf::Left(true)),
-                workspace_symbol_provider: Some(OneOf::Left(true)), // Advertise workspace symbol support
+                workspace_symbol_provider: Some(OneOf::Left(true)),
+                // Register the completion provider with trigger character "["
+                completion_provider: Some(CompletionOptions {
+                    resolve_provider: Some(false),
+                    trigger_characters: Some(vec!["[".to_string()]),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             server_info: None,
@@ -116,6 +132,75 @@ impl LanguageServer for Backend {
         .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
         let symbols = inner_result.map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
         Ok(Some(symbols))
+    }
+
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<CompletionResponse>> {
+        // Retrieve document URI and cursor position.
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let docs = self.documents.lock().unwrap();
+        let text = if let Some(text) = docs.get(&uri) {
+            text
+        } else {
+            return Ok(None);
+        };
+
+        // Check if the text up to the cursor ends with "[[".
+        let lines: Vec<&str> = text.lines().collect();
+        if position.line as usize >= lines.len() {
+            return Ok(None);
+        }
+        let line = lines[position.line as usize];
+        let col = position.character as usize;
+        if col < 2 || !line[..col].ends_with("[[") {
+            return Ok(None);
+        }
+
+        // Get the vault directory from the config.
+        let config: Config = notemancy_core::config::read_config().map_err(|_e| {
+            tower_lsp::jsonrpc::Error::new(tower_lsp::jsonrpc::ErrorCode::InternalError)
+        })?;
+        let vault_dir = std::path::Path::new(&config.vault_dir);
+
+        // Query the database for pages (notes).
+        let mut items = Vec::new();
+        let db = notemancy_core::db::crud::global();
+        if let Ok(mut stmt) = db.conn.prepare("SELECT vpath, title FROM pagetable") {
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            });
+            if let Ok(rows) = rows {
+                for row in rows.flatten() {
+                    let (vpath, title) = row;
+                    // Strip the vault dir from the vpath.
+                    let relative_vpath = std::path::Path::new(&vpath)
+                        .strip_prefix(vault_dir)
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or(vpath.clone());
+                    // Create a text edit that inserts our desired text at the current cursor position.
+                    let text_edit = TextEdit {
+                        range: Range {
+                            start: position,
+                            end: position,
+                        },
+                        new_text: format!("{} | {}", relative_vpath, title),
+                    };
+                    let item = CompletionItem {
+                        label: title.clone(),
+                        kind: Some(CompletionItemKind::FILE),
+                        detail: Some(relative_vpath),
+                        text_edit: Some(CompletionTextEdit::Edit(text_edit)),
+                        ..Default::default()
+                    };
+                    items.push(item);
+                }
+            }
+        }
+
+        Ok(Some(CompletionResponse::Array(items)))
     }
 }
 

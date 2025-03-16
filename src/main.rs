@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+mod formatter;
 
 use notemancy_core::config; // Import the config module from notemancy-core crate
 use notemancy_core::config::Config;
@@ -306,6 +309,18 @@ fn fuzzy_match(query: &str, candidate: &str) -> Option<usize> {
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--fmt") {
+        // In formatting mode: read all from stdin, format the markdown, and output to stdout.
+        let mut input = String::new();
+        io::stdin()
+            .read_to_string(&mut input)
+            .expect("Failed to read from stdin");
+        let formatted = formatter::format_markdown(&input);
+        println!("{}", formatted);
+        return;
+    }
+
     let (service, socket) = LspService::build(|client| Backend {
         client,
         documents: Arc::new(Mutex::new(HashMap::new())),

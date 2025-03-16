@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -19,15 +20,13 @@ struct Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, _params: InitializeParams) -> Result<InitializeResult> {
-        // Advertise full text sync and document symbols.
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
                 document_symbol_provider: Some(OneOf::Left(true)),
-                // Remove workspace_symbol_provider if it was set here,
-                // or if you need to support workspace symbols, use the `symbol` method below.
+                workspace_symbol_provider: Some(OneOf::Left(true)), // Advertise workspace symbol support
                 ..Default::default()
             },
             server_info: None,
@@ -74,20 +73,20 @@ impl LanguageServer for Backend {
     async fn symbol(
         &self,
         params: WorkspaceSymbolParams,
-    ) -> Result<Option<Vec<SymbolInformation>>> {
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<SymbolInformation>>> {
         let query = params.query;
         let inner_result = tokio::task::spawn_blocking(move || {
-            // Read the vault directory from the config.
+            // Read configuration and get the vault directory.
             let config = config::read_config().map_err(|e| e.to_string())?;
-            let vault_dir = std::path::Path::new(&config.vault_dir);
-            // Recursively collect all markdown files.
+            let vault_dir = Path::new(&config.vault_dir);
+            // Collect markdown files (deduplicated).
             let files = collect_markdown_files(vault_dir);
             let mut all_symbols = Vec::new();
             for file in files {
                 let file_syms = extract_workspace_symbols_from_file(&file);
                 all_symbols.extend(file_syms);
             }
-            // Apply a simple fuzzy filter if a query is provided.
+            // Apply fuzzy filtering if a query is provided.
             let filtered = if query.trim().is_empty() {
                 all_symbols
             } else {
@@ -98,11 +97,24 @@ impl LanguageServer for Backend {
                 matches.sort_by_key(|(score, _)| *score);
                 matches.into_iter().map(|(_, sym)| sym).collect()
             };
-            Ok::<_, String>(filtered)
+            // Deduplicate symbols by using a key composed of (name, file URI, start line).
+            let mut seen = HashSet::new();
+            let deduped: Vec<_> = filtered
+                .into_iter()
+                .filter(|sym| {
+                    let key = (
+                        sym.name.clone(),
+                        sym.location.uri.to_string(),
+                        sym.location.range.start.line,
+                    );
+                    seen.insert(key)
+                })
+                .collect();
+            Ok::<_, String>(deduped)
         })
         .await
-        .map_err(|e| tower_lsp::jsonrpc::Error::internal_error())?;
-        let symbols = inner_result.map_err(|e| tower_lsp::jsonrpc::Error::internal_error())?;
+        .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
+        let symbols = inner_result.map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
         Ok(Some(symbols))
     }
 }
@@ -145,24 +157,6 @@ fn parse_markdown_symbols(text: &str) -> Vec<DocumentSymbol> {
         }
     }
     symbols
-}
-
-/// Recursively collects markdown files (with extension ".md") in the given directory.
-fn collect_markdown_files(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                files.extend(collect_markdown_files(&path));
-            } else if let Some(ext) = path.extension() {
-                if ext.to_string_lossy().eq_ignore_ascii_case("md") {
-                    files.push(path);
-                }
-            }
-        }
-    }
-    files
 }
 
 /// Reads a markdown file, extracts headings, and returns them as SymbolInformation.
@@ -334,4 +328,30 @@ Not a heading
         let response = backend.symbol(params).await.unwrap();
         assert!(response.is_some());
     }
+}
+
+/// Recursively collects markdown files from `dir`, deduplicating based on their canonical path.
+fn collect_markdown_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut seen = HashSet::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(collect_markdown_files(&path));
+            } else if let Some(ext) = path.extension() {
+                if ext.to_string_lossy().eq_ignore_ascii_case("md") {
+                    // Canonicalize to resolve symlinks.
+                    if let Ok(canonical) = fs::canonicalize(&path) {
+                        if seen.insert(canonical) {
+                            files.push(path);
+                        }
+                    } else {
+                        files.push(path);
+                    }
+                }
+            }
+        }
+    }
+    files
 }

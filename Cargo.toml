@@ -1,0 +1,17 @@
+[package]
+name = "notemancy-lsp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tower-lsp = "0.20"
+tokio = { version = "1.28", features = ["macros", "rt-multi-thread", "io-std"] }
+url = "2.5.4"
+notemancy-core = { path = "../notemancy-core" }                                  # Assuming the core crate is in a sibling directory
+walkdir = "2.4.0"                                                                # For walking directories recursively
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+once_cell = "1.8"                                                                # For lazy initialization
+futures = "0.3"                                                                  # For async operations
+log = "0.4"
+env_logger = "0.10"
